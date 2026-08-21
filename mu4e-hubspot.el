@@ -702,13 +702,10 @@ resulting buffer to log this email to HubSpot and associate it."
 draft, based on its To, Cc, and Bcc addresses.
 
 Results are cached for the remainder of this drafting session (i.e.
-until this buffer is killed), so re-running this command after
-editing recipients only re-queries HubSpot for addresses it hasn't
-already looked up in this buffer.  Run automatically whenever a
-compose buffer is created (see `mu4e-compose-mode-hook'); re-run by
-hand (bound to \"C-c C-h\") to refresh after changing recipients.
-Selections made in the resulting buffer are only logged and
-associated once this draft is actually sent."
+until this buffer is killed), so re-running this command after editing
+recipients only re-queries HubSpot for addresses it hasn't already
+looked up in this buffer.  Selections made in the resulting buffer are
+only logged and associated once this draft is actually sent."
   (interactive)
   (let ((addresses (mu4e-hubspot--compose-addresses))
         (buffer (current-buffer)))
@@ -718,8 +715,6 @@ associated once this draft is actually sent."
        (mu4e-hubspot--suggestions-for-addresses "compose" addresses)
        (list :kind 'compose :key buffer :buffer buffer)))))
 
-;;;###autoload
-(add-hook 'mu4e-compose-mode-hook #'mu4e-hubspot-show-compose-suggestions)
 
 ;;;###autoload
 (with-eval-after-load 'mu4e-compose
