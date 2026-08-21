@@ -14,7 +14,6 @@ Pretty straightforward:
 
 ```elisp
 (use-package mu4e-hubspot
-    :ensure t
     :vc (:url "https://github.com/merickson/mu4e-hubspot.git"
            :rev :newest)
     :config
