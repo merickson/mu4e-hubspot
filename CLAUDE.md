@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project status
 
 The full original spec is implemented: viewing a received message in mu4e, and composing/replying to
-one, each show HubSpot contacts/companies/deals suggested from their addresses (`From`/`Cc` for view,
-`To`/`Cc`/`Bcc` for compose) as a *selectable* list, and pressing `s` in that list lets you free-text
+one, each show HubSpot contacts/companies/deals suggested from their addresses (`From`/`To`/`Cc` for
+view, `To`/`Cc`/`Bcc` for compose — always excluding the user's own address and any address sharing a
+domain with it) as a *selectable* list, and pressing `s` in that list lets you free-text
 search HubSpot for a contact/company/deal to add when nothing relevant was auto-suggested. Confirming a
 selection logs the message as a HubSpot email engagement and associates it with the chosen records, so
 the message actually shows up on their HubSpot timelines (not just "the contact is associated" — see
@@ -51,8 +52,13 @@ HubSpot for Chrome/Gmail extension:
   emails being composed can be associated with selected HubSpot deals, contacts, and companies.
 - **Auto-suggested associations.** When viewing or composing a message, the package extracts the
   relevant email addresses from the message headers and looks up matching HubSpot objects to suggest:
-  - Received emails: addresses from `From` and `Cc`.
+  - Received emails: addresses from `From`, `To`, and `Cc`.
   - Draft emails: addresses from `To`, `Cc`, and `Bcc`.
+  - Either way, the user's own address and any address sharing a domain with it are always excluded
+    from suggestions (`mu4e-hubspot--own-address-p` in `mu4e-hubspot.el`, built on mu4e's own
+    `mu4e-personal-addresses`/`mu4e-personal-address-p` rather than a separately configured list) — the
+    real message metadata sent to HubSpot (`hs_email_from`/`to`/`cc`/`bcc`) is unaffected by this;
+    only which addresses get *suggestion candidates* is filtered.
 - **Manual search.** Pressing `s` in the suggestions buffer (`mu4e-hubspot-search-and-add`) prompts for
   an object type and free-text query, using HubSpot's own free-text search (the `query` parameter on the
   CRM search endpoint, matching against each type's default searchable properties — not a custom
@@ -129,7 +135,7 @@ representation is a plist (`(:name ... :email ...)`, accessed via `mu4e-contact-
 `mu4e-message-field` (see `mu4e-message.el`).
 
 - **Implemented, view side:** `mu4e-view-mode` — `mu4e-hubspot-show-suggestions` (bound to `C-c C-h` in
-  `mu4e-view-mode-map`) reads `From`/`Cc` off `(mu4e-message-at-point)`.
+  `mu4e-view-mode-map`) reads `From`/`To`/`Cc` off `(mu4e-message-at-point)`.
 - **Implemented, compose side:** `mu4e-compose-mode` (which derives from `message-mode`) — addresses are
   read live from the buffer via `message-fetch-field` + `mail-header-parse-addresses` (from Emacs'
   built-in `mail-parse`), not from an indexed mu4e message plist, since a draft-in-progress has no

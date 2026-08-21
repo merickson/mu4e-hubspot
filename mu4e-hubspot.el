@@ -4,10 +4,11 @@
 
 ;; Viewing a received message in mu4e, or composing/replying to one,
 ;; shows HubSpot contacts/companies/deals suggested from its
-;; From/Cc (view) or To/Cc/Bcc (compose) addresses, in a selectable
-;; side buffer.  Confirming a selection logs the message as a HubSpot
-;; email engagement and associates it with the chosen records, so it
-;; shows up on their timelines:
+;; From/To/Cc (view) or To/Cc/Bcc (compose) addresses, excluding the
+;; user's own address/domain, in a selectable side buffer.  Confirming
+;; a selection logs the message as a HubSpot email engagement and
+;; associates it with the chosen records, so it shows up on their
+;; timelines:
 ;;
 ;; - Viewing a received message: written immediately on confirm.
 ;; - Composing a draft: the selection is staged and only written once
@@ -59,10 +60,35 @@ the mu4e message plist MSG."
    (delq nil (mapcar #'car (apply #'append (mapcar (lambda (f) (mu4e-hubspot--contact-pairs msg f))
                                                      fields))))))
 
+(defun mu4e-hubspot--personal-domains ()
+  "Lowercased, de-duplicated domains of the user's plain personal
+addresses (see `mu4e-personal-addresses'). Regexp-style personal
+addresses are skipped -- a regexp has no single well-defined domain."
+  (delete-dups
+   (delq nil
+         (mapcar (lambda (addr)
+                   (when (string-match "@\\([^@]+\\)\\'" addr)
+                     (downcase (match-string 1 addr))))
+                 (mu4e-personal-addresses t)))))
+
+(defun mu4e-hubspot--own-address-p (email)
+  "Is EMAIL the user's own address (per `mu4e-personal-address-p'),
+or does it share a domain with one of the user's plain personal
+addresses?  Used to keep the user's own address, and colleagues at
+their own domain, out of HubSpot suggestion lists."
+  (or (mu4e-personal-address-p email)
+      (when (string-match "@\\([^@]+\\)\\'" email)
+        (member (downcase (match-string 1 email)) (mu4e-hubspot--personal-domains)))))
+
+(defun mu4e-hubspot--remove-own-addresses (emails)
+  "Remove from EMAILS any address `mu4e-hubspot--own-address-p'."
+  (seq-remove #'mu4e-hubspot--own-address-p emails))
+
 (defun mu4e-hubspot--view-addresses (msg)
   "Addresses to suggest HubSpot associations for on a received
-message: From and Cc."
-  (mu4e-hubspot--addresses msg '(:from :cc)))
+message: From, To, and Cc, excluding the user's own address/domain."
+  (mu4e-hubspot--remove-own-addresses
+   (mu4e-hubspot--addresses msg '(:from :to :cc))))
 
 (defun mu4e-hubspot--header-address-pairs (header)
   "Return the list of (EMAIL . NAME-OR-NIL) pairs found in HEADER
@@ -79,11 +105,13 @@ buffers store headers.  Returns nil if HEADER is absent."
 
 (defun mu4e-hubspot--compose-addresses ()
   "Addresses to suggest HubSpot associations for on a draft message:
-To, Cc, and Bcc, read from the current compose buffer's headers."
-  (mu4e-hubspot--dedup-downcase
-   (append (mu4e-hubspot--header-addresses "To")
-           (mu4e-hubspot--header-addresses "Cc")
-           (mu4e-hubspot--header-addresses "Bcc"))))
+To, Cc, and Bcc, excluding the user's own address/domain, read from
+the current compose buffer's headers."
+  (mu4e-hubspot--remove-own-addresses
+   (mu4e-hubspot--dedup-downcase
+    (append (mu4e-hubspot--header-addresses "To")
+            (mu4e-hubspot--header-addresses "Cc")
+            (mu4e-hubspot--header-addresses "Bcc")))))
 
 ;;; Session-scoped suggestion cache
 
@@ -675,7 +703,8 @@ earlier confirm in the same buffer."
 ;;;###autoload
 (defun mu4e-hubspot-show-suggestions ()
   "Show suggested HubSpot contacts/companies/deals for the message at
-point in mu4e-view, based on its From and Cc addresses.
+point in mu4e-view, based on its From, To, and Cc addresses (excluding
+the user's own address/domain).
 
 Results are cached for the remainder of this viewing session (i.e.
 until a different message is shown in this mu4e-view buffer), so
@@ -687,7 +716,7 @@ resulting buffer to log this email to HubSpot and associate it."
          (session-key (mu4e-hubspot--message-session-key msg))
          (addresses (mu4e-hubspot--view-addresses msg)))
     (unless addresses
-      (user-error "mu4e-hubspot: no From/Cc addresses found on this message"))
+      (user-error "mu4e-hubspot: no From/To/Cc addresses found on this message"))
     (mu4e-hubspot--display
      (mu4e-hubspot--suggestions-for-addresses session-key addresses)
      (list :kind 'view :key session-key :msg msg))))

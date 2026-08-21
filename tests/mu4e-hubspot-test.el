@@ -22,14 +22,50 @@
     (should (equal (mu4e-hubspot--view-addresses msg)
                     '("alice@example.com" "bob@example.com")))))
 
-(ert-deftest mu4e-hubspot-test-view-addresses-ignores-to-and-bcc ()
+(ert-deftest mu4e-hubspot-test-view-addresses-includes-to ()
   (let ((msg (list :from (list (mu4e-hubspot-test--contact "Alice" "alice@example.com"))
                     :to (list (mu4e-hubspot-test--contact "Carl" "carl@example.com"))
+                    :bcc (list (mu4e-hubspot-test--contact "Dana" "dana@example.com")))))
+    (should (equal (mu4e-hubspot--view-addresses msg)
+                    '("alice@example.com" "carl@example.com")))))
+
+(ert-deftest mu4e-hubspot-test-view-addresses-ignores-bcc ()
+  (let ((msg (list :from (list (mu4e-hubspot-test--contact "Alice" "alice@example.com"))
                     :bcc (list (mu4e-hubspot-test--contact "Dana" "dana@example.com")))))
     (should (equal (mu4e-hubspot--view-addresses msg) '("alice@example.com")))))
 
 (ert-deftest mu4e-hubspot-test-view-addresses-empty ()
   (should (null (mu4e-hubspot--view-addresses (list :from nil :cc nil)))))
+
+(defmacro mu4e-hubspot-test--with-personal-addresses (addresses &rest body)
+  "Run BODY with `mu4e-personal-addresses' stubbed to return
+ADDRESSES (honoring the NO-REGEXP argument the same way the real
+function does, by dropping `/regexp/'-wrapped entries), so
+`mu4e-hubspot--own-address-p' and friends can be exercised without a
+running mu4e session."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'mu4e-personal-addresses)
+              (lambda (&optional no-regexp)
+                (if no-regexp
+                    (seq-remove (lambda (addr) (string-match "\\`/.*/\\'" addr)) ,addresses)
+                  ,addresses))))
+     ,@body))
+
+(ert-deftest mu4e-hubspot-test-view-addresses-excludes-own-address ()
+  (mu4e-hubspot-test--with-personal-addresses '("me@example.com")
+    (let ((msg (list :from (list (mu4e-hubspot-test--contact "Me" "me@example.com"))
+                      :cc (list (mu4e-hubspot-test--contact "Carl" "carl@other.com")))))
+      (should (equal (mu4e-hubspot--view-addresses msg) '("carl@other.com"))))))
+
+(ert-deftest mu4e-hubspot-test-view-addresses-excludes-own-domain ()
+  (mu4e-hubspot-test--with-personal-addresses '("me@example.com")
+    (let ((msg (list :from (list (mu4e-hubspot-test--contact "Colleague" "colleague@example.com"))
+                      :cc (list (mu4e-hubspot-test--contact "Carl" "carl@other.com")))))
+      (should (equal (mu4e-hubspot--view-addresses msg) '("carl@other.com"))))))
+
+(ert-deftest mu4e-hubspot-test-personal-domains-skips-regexp-addresses ()
+  (mu4e-hubspot-test--with-personal-addresses '("me@example.com" "/.*@alt\\.example\\.com/")
+    (should (equal (mu4e-hubspot--personal-domains) '("example.com")))))
 
 (defun mu4e-hubspot-test--with-headers (headers body-fn)
   "Run BODY-FN in a temp buffer containing HEADERS (an alist of
@@ -63,6 +99,22 @@ expects a message-mode buffer to be laid out."
    '(("Subject" . "hi"))
    (lambda ()
      (should (null (mu4e-hubspot--compose-addresses))))))
+
+(ert-deftest mu4e-hubspot-test-compose-addresses-excludes-own-address ()
+  (mu4e-hubspot-test--with-personal-addresses '("me@example.com")
+    (mu4e-hubspot-test--with-headers
+     '(("To" . "me@example.com")
+       ("Cc" . "carl@other.com"))
+     (lambda ()
+       (should (equal (mu4e-hubspot--compose-addresses) '("carl@other.com")))))))
+
+(ert-deftest mu4e-hubspot-test-compose-addresses-excludes-own-domain ()
+  (mu4e-hubspot-test--with-personal-addresses '("me@example.com")
+    (mu4e-hubspot-test--with-headers
+     '(("To" . "colleague@example.com")
+       ("Cc" . "carl@other.com"))
+     (lambda ()
+       (should (equal (mu4e-hubspot--compose-addresses) '("carl@other.com")))))))
 
 (ert-deftest mu4e-hubspot-test-compose-mime-parts-multipart-html ()
   "org-mime-style <#multipart>/<#part> MML markup should yield the
