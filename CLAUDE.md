@@ -58,6 +58,16 @@ HubSpot for Chrome/Gmail extension:
   CRM search endpoint, matching against each type's default searchable properties — not a custom
   filter), then lets the user pick a result to add to the selection, for records that weren't
   auto-suggested. Added pre-selected; toggle it off with SPC/RET like any other candidate.
+- **Create a contact that doesn't exist yet.** Contacts only (not companies/deals). Two entry points:
+  an address with no matching HubSpot contact renders a selectable "create new contact <email>"
+  candidate right in place of a match (instead of a dead-end "no matching HubSpot contact" line); and a
+  manual contacts search (`s`) with zero results offers to create one instead, prompting for email
+  (required) and name (optional). Either way the result is an ordinary selectable/toggleable candidate
+  — `mu4e-hubspot-candidate`'s `pending` slot marks it as "not created yet" — and the actual
+  `mu4e-hubspot-api-create-contact` call happens in `mu4e-hubspot--resolve-associations`, right before
+  the id is needed to associate it, which for a compose draft means at actual send-time, not at confirm
+  time (same "nothing written until send" rule as every other compose association). A failed creation is
+  collected as a failure alongside association failures rather than aborting the rest.
 - **Send-time association.** Associations chosen while composing are applied to the corresponding
   HubSpot objects when the draft is actually sent, not when the association is chosen.
 

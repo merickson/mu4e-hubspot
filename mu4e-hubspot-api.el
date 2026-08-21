@@ -209,18 +209,38 @@ return the created object (with its id)."
    "POST" (format "/crm/objects/%s/emails" mu4e-hubspot-api--version)
    nil (list (cons 'properties properties))))
 
+(defun mu4e-hubspot-api--split-name (name)
+  "Naively split NAME into (FIRST . LAST-OR-NIL) on whitespace, or nil
+if NAME is nil.  Shared convention for turning a display name into
+HubSpot firstname/lastname-shaped properties."
+  (when name
+    (let* ((parts (split-string name))
+           (first-name (car parts))
+           (last-name (and (cdr parts) (mapconcat #'identity (cdr parts) " "))))
+      (cons first-name last-name))))
+
 (defun mu4e-hubspot-api--address-object (pair)
   "Build a HubSpot hs_email_headers participant object from PAIR, a
 (EMAIL . NAME-OR-NIL) cons.  NAME, if present, is naively split into
-first/last name on whitespace."
+first/last name on whitespace via `mu4e-hubspot-api--split-name'."
   (let* ((email (car pair))
-         (name (cdr pair))
-         (parts (and name (split-string name)))
-         (first-name (car parts))
-         (last-name (and (cdr parts) (mapconcat #'identity (cdr parts) " "))))
+         (split (mu4e-hubspot-api--split-name (cdr pair))))
     (delq nil (list (cons 'email email)
-                     (and first-name (cons 'firstName first-name))
-                     (and last-name (cons 'lastName last-name))))))
+                     (and (car split) (cons 'firstName (car split)))
+                     (and (cdr split) (cons 'lastName (cdr split)))))))
+
+(defun mu4e-hubspot-api-create-contact (email &optional name)
+  "Create a new HubSpot contact with EMAIL and return the created
+object (with its id).  NAME, if given, is naively split into
+first/last name via `mu4e-hubspot-api--split-name' and sent as the
+contact's firstname/lastname properties."
+  (let* ((split (mu4e-hubspot-api--split-name name))
+         (properties (delq nil (list (cons 'email email)
+                                      (and (car split) (cons 'firstname (car split)))
+                                      (and (cdr split) (cons 'lastname (cdr split)))))))
+    (mu4e-hubspot-api--request
+     "POST" (format "/crm/objects/%s/contacts" mu4e-hubspot-api--version)
+     nil (list (cons 'properties properties)))))
 
 (defun mu4e-hubspot-api-build-email-headers (from to cc bcc)
   "Build the JSON string for a HubSpot email engagement's

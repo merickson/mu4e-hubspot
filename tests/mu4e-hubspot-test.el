@@ -197,21 +197,95 @@ candidate line (the matched contact)."
 (ert-deftest mu4e-hubspot-test-confirm-associations-view-writes-immediately ()
   (let (called)
     (cl-letf (((symbol-function 'mu4e-hubspot--log-view-message-now)
-               (lambda (msg associations) (setq called (list msg associations)))))
+               (lambda (msg candidates) (setq called (list msg candidates)))))
       (mu4e-hubspot-test--with-rendered-buffer (list :kind 'view :key "k" :msg 'the-msg)
         (mu4e-hubspot-toggle-candidate)
         (mu4e-hubspot-confirm-associations)))
-    (should (equal called (list 'the-msg '(("contacts" . "1")))))))
+    (should (equal (car called) 'the-msg))
+    (should (equal (mapcar #'mu4e-hubspot--candidate-key (cadr called)) '(("contacts" . "1"))))))
 
 (ert-deftest mu4e-hubspot-test-confirm-associations-compose-defers ()
   (let (staged)
     (cl-letf (((symbol-function 'mu4e-hubspot--stage-for-send)
-               (lambda (compose-buffer associations) (setq staged (list compose-buffer associations)))))
+               (lambda (compose-buffer candidates) (setq staged (list compose-buffer candidates)))))
       (mu4e-hubspot-test--with-rendered-buffer
           (list :kind 'compose :key 'compose-buf :buffer 'compose-buf)
         (mu4e-hubspot-toggle-candidate)
         (mu4e-hubspot-confirm-associations)))
-    (should (equal staged (list 'compose-buf '(("contacts" . "1")))))))
+    (should (equal (car staged) 'compose-buf))
+    (should (equal (mapcar #'mu4e-hubspot--candidate-key (cadr staged)) '(("contacts" . "1"))))))
+
+;;; Contact creation for unmatched addresses / search misses
+
+(ert-deftest mu4e-hubspot-test-insert-suggestion-no-contact-is-selectable ()
+  "An address with no matching HubSpot contact renders a selectable
+\"create new contact\" candidate instead of the old static text."
+  (let ((buf (generate-new-buffer "*mu4e-hubspot-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (mu4e-hubspot-suggestions-mode)
+          (setq mu4e-hubspot--address-suggestions (list (cons "nobody@example.com" nil)))
+          (setq mu4e-hubspot--source (list :kind 'view :key "k" :msg nil))
+          (mu4e-hubspot--render)
+          (goto-char (point-min))
+          (forward-line 1)
+          (let ((candidate (get-text-property (point) 'mu4e-hubspot-candidate)))
+            (should candidate)
+            (should (equal (mu4e-hubspot-candidate-type candidate) "contacts"))
+            (should (null (mu4e-hubspot-candidate-id candidate)))
+            (should (equal (plist-get (mu4e-hubspot-candidate-pending candidate) :email)
+                            "nobody@example.com"))))
+      (kill-buffer buf))))
+
+(ert-deftest mu4e-hubspot-test-resolve-associations-passthrough ()
+  (let ((candidate (mu4e-hubspot--named-candidate
+                     "companies" "Company" 'name
+                     '((id . "5") (properties . ((name . "Acme")))))))
+    (cl-letf (((symbol-function 'mu4e-hubspot-api-create-contact)
+               (lambda (&rest _) (error "should not create a contact for a non-pending candidate"))))
+      (let ((resolved (mu4e-hubspot--resolve-associations (list candidate))))
+        (should (equal (plist-get resolved :associations) '(("companies" . "5"))))
+        (should (null (plist-get resolved :failures)))))))
+
+(ert-deftest mu4e-hubspot-test-resolve-associations-creates-pending-contact ()
+  (let ((candidate (mu4e-hubspot--new-contact-candidate "alice@example.com" "Alice Smith"))
+        (captured-args nil))
+    (cl-letf (((symbol-function 'mu4e-hubspot-api-create-contact)
+               (lambda (email name)
+                 (setq captured-args (list email name))
+                 '((id . "123")))))
+      (let ((resolved (mu4e-hubspot--resolve-associations (list candidate))))
+        (should (equal captured-args '("alice@example.com" "Alice Smith")))
+        (should (equal (plist-get resolved :associations) '(("contacts" . "123"))))
+        (should (null (plist-get resolved :failures)))))))
+
+(ert-deftest mu4e-hubspot-test-resolve-associations-collects-creation-failure ()
+  (let ((pending (mu4e-hubspot--new-contact-candidate "bad@example.com"))
+        (existing (mu4e-hubspot--named-candidate
+                   "companies" "Company" 'name
+                   '((id . "5") (properties . ((name . "Acme")))))))
+    (cl-letf (((symbol-function 'mu4e-hubspot-api-create-contact)
+               (lambda (&rest _) (error "boom"))))
+      (let ((resolved (mu4e-hubspot--resolve-associations (list pending existing))))
+        (should (equal (plist-get resolved :associations) '(("companies" . "5"))))
+        (should (= (length (plist-get resolved :failures)) 1))
+        (should (equal (car (car (plist-get resolved :failures)))
+                        '("contacts" . "bad@example.com")))))))
+
+(ert-deftest mu4e-hubspot-test-compose-stage-defers-contact-creation-until-send ()
+  "Staging a pending contact for a compose draft must not create it
+immediately -- only once the staged send-action actually runs."
+  (with-temp-buffer
+    (let ((message-send-actions nil)
+          (created nil))
+      (cl-letf (((symbol-function 'mu4e-hubspot-api-create-contact)
+                 (lambda (&rest _) (setq created t) '((id . "1"))))
+                ((symbol-function 'mu4e-hubspot-api-log-email) (lambda (&rest _) '(:id "1"))))
+        (mu4e-hubspot--stage-for-send
+         (current-buffer) (list (mu4e-hubspot--new-contact-candidate "alice@example.com")))
+        (should (null created))
+        (dolist (action message-send-actions) (funcall action))
+        (should created)))))
 
 (ert-deftest mu4e-hubspot-test-display-resets-selection-only-on-new-key ()
   (unwind-protect
@@ -326,10 +400,60 @@ the user is expected to act on it with the very next keystroke."
       (should (string-match-p "Globex" (buffer-string))))))
 
 (ert-deftest mu4e-hubspot-test-search-and-add-no-results ()
+  "Non-contacts types with no matches are unaffected by the
+create-a-contact prompt -- just report no match."
+  (mu4e-hubspot-test--with-rendered-buffer (list :kind 'view :key "k" :msg 'the-msg)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Company"))
+              ((symbol-function 'read-string) (lambda (&rest _) "nobody"))
+              ((symbol-function 'mu4e-hubspot-api-search-by-text) (lambda (&rest _) nil))
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "should not prompt to create for non-contacts"))))
+      (mu4e-hubspot-search-and-add)
+      (should (null mu4e-hubspot--manual-candidates)))))
+
+(ert-deftest mu4e-hubspot-test-search-and-add-no-contacts-declines-creation ()
   (mu4e-hubspot-test--with-rendered-buffer (list :kind 'view :key "k" :msg 'the-msg)
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Contact"))
               ((symbol-function 'read-string) (lambda (&rest _) "nobody"))
-              ((symbol-function 'mu4e-hubspot-api-search-by-text) (lambda (&rest _) nil)))
+              ((symbol-function 'mu4e-hubspot-api-search-by-text) (lambda (&rest _) nil))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+      (mu4e-hubspot-search-and-add)
+      (should (null mu4e-hubspot--manual-candidates)))))
+
+(ert-deftest mu4e-hubspot-test-search-and-add-no-contacts-creates-pending ()
+  (mu4e-hubspot-test--with-rendered-buffer (list :kind 'view :key "k" :msg 'the-msg)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Contact"))
+              ((symbol-function 'read-string)
+               (lambda (prompt &rest _)
+                 (cond ((string-match-p "Search HubSpot" prompt) "nobody@example.com")
+                       ((string-match-p "New contact email" prompt) "nobody@example.com")
+                       ((string-match-p "New contact name" prompt) "Nobody Special")
+                       (t (error "unexpected prompt: %s" prompt)))))
+              ((symbol-function 'mu4e-hubspot-api-search-by-text) (lambda (&rest _) nil))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (mu4e-hubspot-search-and-add)
+      (should (= (length mu4e-hubspot--manual-candidates) 1))
+      (let ((candidate (car mu4e-hubspot--manual-candidates)))
+        (should (equal (mu4e-hubspot-candidate-type candidate) "contacts"))
+        (should (null (mu4e-hubspot-candidate-id candidate)))
+        (should (equal (plist-get (mu4e-hubspot-candidate-pending candidate) :email)
+                        "nobody@example.com"))
+        (should (equal (plist-get (mu4e-hubspot-candidate-pending candidate) :name)
+                        "Nobody Special"))
+        ;; pre-selected, like any other manually added candidate
+        (should (member (mu4e-hubspot--candidate-key candidate)
+                         (mapcar #'mu4e-hubspot--candidate-key (mu4e-hubspot--selected-candidates))))))))
+
+(ert-deftest mu4e-hubspot-test-search-and-add-no-contacts-blank-email-not-added ()
+  (mu4e-hubspot-test--with-rendered-buffer (list :kind 'view :key "k" :msg 'the-msg)
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Contact"))
+              ((symbol-function 'read-string)
+               (lambda (prompt &rest _)
+                 (cond ((string-match-p "Search HubSpot" prompt) "nobody")
+                       ((string-match-p "New contact email" prompt) "")
+                       (t (error "unexpected prompt: %s" prompt)))))
+              ((symbol-function 'mu4e-hubspot-api-search-by-text) (lambda (&rest _) nil))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
       (mu4e-hubspot-search-and-add)
       (should (null mu4e-hubspot--manual-candidates)))))
 

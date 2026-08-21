@@ -132,8 +132,13 @@ looking each up via the session cache scoped to SESSION-KEY."
 (cl-defstruct mu4e-hubspot-candidate
   "A selectable HubSpot record shown in the suggestions buffer.
 TYPE is a HubSpot object-type path segment (\"contacts\",
-\"companies\", or \"deals\")."
-  type id label)
+\"companies\", or \"deals\").  PENDING, when non-nil, is a plist
+(:email EMAIL :name NAME-OR-NIL) marking this candidate as a contact
+that doesn't exist in HubSpot yet -- ID is nil in that case, and
+selecting+confirming this candidate creates the contact (see
+`mu4e-hubspot--resolve-associations') instead of referencing an
+existing record."
+  type id label pending)
 
 (defconst mu4e-hubspot--buffer-name "*mu4e-hubspot*"
   "Name of the buffer used to display suggested HubSpot associations.")
@@ -222,7 +227,24 @@ candidates."
     ("deals" (mu4e-hubspot--named-candidate "deals" "Deal" 'dealname object))))
 
 (defun mu4e-hubspot--candidate-key (candidate)
-  (cons (mu4e-hubspot-candidate-type candidate) (mu4e-hubspot-candidate-id candidate)))
+  "Return a key uniquely identifying CANDIDATE for selection purposes.
+Falls back to its pending contact's email when it has no id yet (see
+`mu4e-hubspot-candidate-pending')."
+  (cons (mu4e-hubspot-candidate-type candidate)
+        (or (mu4e-hubspot-candidate-id candidate)
+            (plist-get (mu4e-hubspot-candidate-pending candidate) :email))))
+
+(defun mu4e-hubspot--new-contact-candidate (email &optional name)
+  "Build a selectable `mu4e-hubspot-candidate' representing a contact
+that doesn't exist in HubSpot yet.  Selecting and confirming it
+creates the contact (see `mu4e-hubspot--resolve-associations') before
+associating it, rather than referencing an existing record.  NAME, if
+given, is passed through to `mu4e-hubspot-api-create-contact' to
+prefill firstname/lastname on creation."
+  (make-mu4e-hubspot-candidate
+   :type "contacts" :id nil
+   :label (format "%-8s: create new contact <%s>" "Contact" email)
+   :pending (list :email email :name name)))
 
 (defun mu4e-hubspot--selected-p (candidate)
   (and mu4e-hubspot--selected
@@ -249,7 +271,7 @@ nil) for EMAIL at point, one selectable line per candidate record."
         (dolist (deal (mu4e-hubspot-suggestion-deals suggestion))
           (mu4e-hubspot--insert-candidate
            (mu4e-hubspot--named-candidate "deals" "Deal" 'dealname deal))))
-    (insert "  (no matching HubSpot contact)\n"))
+    (mu4e-hubspot--insert-candidate (mu4e-hubspot--new-contact-candidate email)))
   (insert "\n"))
 
 (defun mu4e-hubspot--footer-text ()
@@ -339,6 +361,32 @@ chosen object, or nil if RESULTS is empty."
            (choice (completing-read "Choose: " (mapcar #'car labeled) nil t)))
       (cdr (assoc choice labeled)))))
 
+(defun mu4e-hubspot--add-manual-candidate (candidate)
+  "Add CANDIDATE to `mu4e-hubspot--manual-candidates', pre-select it,
+and re-render -- shared by `mu4e-hubspot-search-and-add' whether
+CANDIDATE references an existing HubSpot record or (via its `pending'
+slot) a contact to be created on confirm."
+  (push candidate mu4e-hubspot--manual-candidates)
+  (unless mu4e-hubspot--selected
+    (setq mu4e-hubspot--selected (make-hash-table :test #'equal)))
+  (puthash (mu4e-hubspot--candidate-key candidate) candidate mu4e-hubspot--selected)
+  (mu4e-hubspot--render)
+  (message "mu4e-hubspot: added %s" (mu4e-hubspot-candidate-label candidate)))
+
+(defun mu4e-hubspot--prompt-new-contact (default-email)
+  "Prompt to create a new HubSpot contact, offered when a manual
+contacts search comes back empty.  Returns a pending
+`mu4e-hubspot-candidate' (see `mu4e-hubspot--new-contact-candidate'),
+or nil if the user declines or gives no email.  DEFAULT-EMAIL
+prefills the email prompt (e.g. when the search query itself already
+looked like an address)."
+  (when (y-or-n-p "No matches -- create a new contact instead? ")
+    (let ((email (string-trim (read-string "New contact email: " default-email))))
+      (if (zerop (length email))
+          (progn (message "mu4e-hubspot: no email given, not creating a contact") nil)
+        (let ((name (string-trim (read-string "New contact name (optional): "))))
+          (mu4e-hubspot--new-contact-candidate email (and (> (length name) 0) name)))))))
+
 (defun mu4e-hubspot-search-and-add ()
   "Search HubSpot for a contact, company, or deal by free text and add
 it to the selection in this suggestions buffer -- for records that
@@ -347,10 +395,14 @@ weren't auto-suggested from the message's addresses.
 Matches are HubSpot's own free-text search against each object
 type's default searchable properties (name/email for contacts, name
 for companies, deal name for deals), the same as HubSpot's own
-search UI, not a custom filter this package defines.
+search UI, not a custom filter this package defines.  If a contacts
+search comes back empty, offers to create a new contact instead (see
+`mu4e-hubspot--prompt-new-contact'); companies/deals searches with no
+matches are unaffected.
 
-The chosen record is added pre-selected; toggle it off with SPC/RET
-like any other candidate if you change your mind before confirming."
+The chosen (or newly created) record is added pre-selected; toggle it
+off with SPC/RET like any other candidate if you change your mind
+before confirming."
   (interactive)
   (let* ((type (mu4e-hubspot--read-object-type))
          (query (string-trim
@@ -361,17 +413,47 @@ like any other candidate if you change your mind before confirming."
       (let* ((properties (mu4e-hubspot--object-search-properties type))
              (results (mu4e-hubspot-api-search-by-text type query properties)))
         (if (null results)
-            (message "mu4e-hubspot: no %s matched %S" type query)
+            (if (equal type "contacts")
+                (when-let ((candidate (mu4e-hubspot--prompt-new-contact
+                                        (and (string-match-p "@" query) query))))
+                  (mu4e-hubspot--add-manual-candidate candidate))
+              (message "mu4e-hubspot: no %s matched %S" type query))
           (when-let ((chosen (mu4e-hubspot--choose-search-result type results)))
-            (let ((candidate (mu4e-hubspot--object-candidate type chosen)))
-              (push candidate mu4e-hubspot--manual-candidates)
-              (unless mu4e-hubspot--selected
-                (setq mu4e-hubspot--selected (make-hash-table :test #'equal)))
-              (puthash (mu4e-hubspot--candidate-key candidate) candidate mu4e-hubspot--selected)
-              (mu4e-hubspot--render)
-              (message "mu4e-hubspot: added %s" (mu4e-hubspot-candidate-label candidate)))))))))
+            (mu4e-hubspot--add-manual-candidate (mu4e-hubspot--object-candidate type chosen))))))))
 
 ;;; Logging and associating
+
+(defun mu4e-hubspot--resolve-associations (candidates)
+  "Resolve CANDIDATES (a list of `mu4e-hubspot-candidate') into a
+plist (:associations ASSOCIATIONS :failures FAILURES).
+
+Most candidates already reference an existing HubSpot record, so
+their `mu4e-hubspot--candidate-key' (a (TYPE . ID) cons) is used
+as-is.  A candidate with a `pending' slot set (a \"create new
+contact\" candidate from an unmatched address or a manual-search
+miss, see `mu4e-hubspot--new-contact-candidate') doesn't have a real
+id yet -- this creates it via `mu4e-hubspot-api-create-contact' right
+here, immediately before it's needed, so for a draft that happens at
+actual send-time (inside the closure staged by
+`mu4e-hubspot--stage-for-send'), not at confirm time, consistent with
+nothing else being written to HubSpot until the draft is sent.
+
+A failed creation is collected into FAILURES as
+((\"contacts\" . EMAIL) . ERROR) -- the same shape
+`mu4e-hubspot-api-log-email' uses for association failures -- rather
+than aborting the rest of the associations."
+  (let (associations failures)
+    (dolist (candidate candidates)
+      (let ((pending (mu4e-hubspot-candidate-pending candidate)))
+        (if (not pending)
+            (push (mu4e-hubspot--candidate-key candidate) associations)
+          (condition-case err
+              (let* ((created (mu4e-hubspot-api-create-contact
+                                (plist-get pending :email) (plist-get pending :name)))
+                     (id (alist-get 'id created)))
+                (push (cons "contacts" id) associations))
+            (error (push (cons (cons "contacts" (plist-get pending :email)) err) failures))))))
+    (list :associations (nreverse associations) :failures (nreverse failures))))
 
 (defun mu4e-hubspot--report-result (result)
   "Message a summary of RESULT, as returned by `mu4e-hubspot-api-log-email'.
@@ -436,21 +518,26 @@ degrading it to plain text and rebuilding crude <br>-based HTML from
 that, which would lose real formatting (links, bold, etc.)."
   (ignore-errors (mu4e-view-message-html msg t)))
 
-(defun mu4e-hubspot--log-view-message-now (msg associations)
+(defun mu4e-hubspot--log-view-message-now (msg candidates)
   "Log MSG as a HubSpot email engagement and associate it with
-ASSOCIATIONS (a list of (OBJECT-TYPE . OBJECT-ID) conses)."
-  (mu4e-hubspot--report-result
-   (mu4e-hubspot-api-log-email
-    :subject (mu4e-message-field msg :subject)
-    :body (mu4e-hubspot--message-body-text msg)
-    :html (mu4e-hubspot--message-html-text msg)
-    :direction "INCOMING_EMAIL"
-    :timestamp (mu4e-hubspot--message-timestamp msg)
-    :from (car (mu4e-hubspot--contact-pairs msg :from))
-    :to (mu4e-hubspot--contact-pairs msg :to)
-    :cc (mu4e-hubspot--contact-pairs msg :cc)
-    :bcc (mu4e-hubspot--contact-pairs msg :bcc)
-    :associations associations)))
+CANDIDATES (a list of `mu4e-hubspot-candidate', resolved to real ids
+-- creating any pending contacts along the way -- via
+`mu4e-hubspot--resolve-associations')."
+  (let* ((resolved (mu4e-hubspot--resolve-associations candidates))
+         (result (mu4e-hubspot-api-log-email
+                  :subject (mu4e-message-field msg :subject)
+                  :body (mu4e-hubspot--message-body-text msg)
+                  :html (mu4e-hubspot--message-html-text msg)
+                  :direction "INCOMING_EMAIL"
+                  :timestamp (mu4e-hubspot--message-timestamp msg)
+                  :from (car (mu4e-hubspot--contact-pairs msg :from))
+                  :to (mu4e-hubspot--contact-pairs msg :to)
+                  :cc (mu4e-hubspot--contact-pairs msg :cc)
+                  :bcc (mu4e-hubspot--contact-pairs msg :bcc)
+                  :associations (plist-get resolved :associations))))
+    (mu4e-hubspot--report-result
+     (list :id (plist-get result :id)
+           :failures (append (plist-get resolved :failures) (plist-get result :failures))))))
 
 (defun mu4e-hubspot--compose-body-text ()
   "Return the plain-text body of the current compose buffer, verbatim
@@ -507,30 +594,38 @@ transmission) -- the actual compose buffer is never modified."
                           (mm-get-part plain-part))))
               (mm-destroy-parts handles))))))))
 
-(defun mu4e-hubspot--log-compose-buffer-now (associations)
+(defun mu4e-hubspot--log-compose-buffer-now (candidates)
   "Log the current compose buffer's message as a HubSpot email
-engagement and associate it with ASSOCIATIONS.  Must be called from
-within the compose buffer, at or after the message has actually been
-sent (so headers/body reflect what was sent)."
+engagement and associate it with CANDIDATES (a list of
+`mu4e-hubspot-candidate', resolved to real ids -- creating any
+pending contacts along the way -- via
+`mu4e-hubspot--resolve-associations').  Must be called from within
+the compose buffer, at or after the message has actually been sent
+(so headers/body reflect what was sent, and so any pending contact is
+only created once the draft is actually going out)."
   (let* ((mime-parts (mu4e-hubspot--compose-mime-parts))
          (html (car mime-parts))
-         (body (or (cdr mime-parts) (mu4e-hubspot--compose-body-text))))
+         (body (or (cdr mime-parts) (mu4e-hubspot--compose-body-text)))
+         (resolved (mu4e-hubspot--resolve-associations candidates))
+         (result (mu4e-hubspot-api-log-email
+                  :subject (message-fetch-field "Subject")
+                  :body body
+                  :html html
+                  :direction "EMAIL"
+                  :timestamp (mu4e-hubspot--epoch-millis)
+                  :from (car (mu4e-hubspot--header-address-pairs "From"))
+                  :to (mu4e-hubspot--header-address-pairs "To")
+                  :cc (mu4e-hubspot--header-address-pairs "Cc")
+                  :bcc (mu4e-hubspot--header-address-pairs "Bcc")
+                  :associations (plist-get resolved :associations))))
     (mu4e-hubspot--report-result
-     (mu4e-hubspot-api-log-email
-      :subject (message-fetch-field "Subject")
-      :body body
-      :html html
-      :direction "EMAIL"
-      :timestamp (mu4e-hubspot--epoch-millis)
-      :from (car (mu4e-hubspot--header-address-pairs "From"))
-      :to (mu4e-hubspot--header-address-pairs "To")
-      :cc (mu4e-hubspot--header-address-pairs "Cc")
-      :bcc (mu4e-hubspot--header-address-pairs "Bcc")
-      :associations associations))))
+     (list :id (plist-get result :id)
+           :failures (append (plist-get resolved :failures) (plist-get result :failures))))))
 
-(defun mu4e-hubspot--stage-for-send (compose-buffer associations)
-  "Arrange for ASSOCIATIONS to be logged and associated with the draft
-in COMPOSE-BUFFER once it is actually sent.
+(defun mu4e-hubspot--stage-for-send (compose-buffer candidates)
+  "Arrange for CANDIDATES to be resolved (creating any pending
+contacts), logged, and associated with the draft in COMPOSE-BUFFER
+once it is actually sent.
 
 `message-send-actions' runs each action inside `ignore-errors', so
 any failure here is caught and reported explicitly first -- otherwise
@@ -539,7 +634,7 @@ email wasn't logged."
   (with-current-buffer compose-buffer
     (push (lambda ()
             (condition-case err
-                (mu4e-hubspot--log-compose-buffer-now associations)
+                (mu4e-hubspot--log-compose-buffer-now candidates)
               (error
                (message "mu4e-hubspot: failed to log/associate sent email: %s"
                          (error-message-string err)))))
@@ -556,16 +651,15 @@ itself in that case."
   (let ((candidates (mu4e-hubspot--selected-candidates)))
     (unless candidates
       (user-error "mu4e-hubspot: nothing selected"))
-    (let ((associations (mapcar #'mu4e-hubspot--candidate-key candidates))
-          (source mu4e-hubspot--source))
+    (let ((source mu4e-hubspot--source))
       (pcase (plist-get source :kind)
         ('view
-         (mu4e-hubspot--log-view-message-now (plist-get source :msg) associations)
-         (message "mu4e-hubspot: logged and associated with %d record(s)" (length associations)))
+         (mu4e-hubspot--log-view-message-now (plist-get source :msg) candidates)
+         (message "mu4e-hubspot: logged and associated with %d record(s)" (length candidates)))
         ('compose
-         (mu4e-hubspot--stage-for-send (plist-get source :buffer) associations)
+         (mu4e-hubspot--stage-for-send (plist-get source :buffer) candidates)
          (message "mu4e-hubspot: will log and associate %d record(s) when this draft is sent"
-                   (length associations)))
+                   (length candidates)))
         (_ (user-error "mu4e-hubspot: no source for this suggestions buffer"))))))
 
 (defun mu4e-hubspot-cancel ()
